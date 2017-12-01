@@ -453,7 +453,7 @@ namespace nanoflann
 		};
 	};
 	/** Metaprogramming helper traits class for the L2 (Euclidean) metric */
-	struct metric_L2 : public Metric 
+	struct metric_L2 : public Metric
 	{
 		template<class T, class DataSource>
 		struct traits {
@@ -469,7 +469,7 @@ namespace nanoflann
 		};
 	};
 	/** Metaprogramming helper traits class for the SO3_InnerProdQuat metric */
-	struct metric_SO2 : public Metric 
+	struct metric_SO2 : public Metric
 	{
 		template<class T, class DataSource>
 		struct traits {
@@ -786,7 +786,7 @@ namespace nanoflann
 	struct array_or_vector_selector<-1, T> {
 		typedef std::vector<T> container_t;
 	};
-	
+
 	/** @} */
 
 	/** kd-tree base-class
@@ -833,7 +833,7 @@ namespace nanoflann
 			} node_type;
 			Node *child1, *child2;  //!< Child nodes (both=NULL mean its a leaf node)
 		};
-		
+
 		typedef Node* NodePtr;
 
 		struct Interval
@@ -861,7 +861,7 @@ namespace nanoflann
 		typedef typename array_or_vector_selector<DIM, DistanceType>::container_t distance_vector_t;
 
 		/** The KD-tree used to find neighbours */
-		
+
 		BoundingBox root_bbox;
 
 		/**
@@ -1159,7 +1159,7 @@ namespace nanoflann
 		/** Hidden copy constructor, to disallow copying indices (Not implemented) */
 		KDTreeSingleIndexAdaptor(const KDTreeSingleIndexAdaptor<Distance, DatasetAdaptor, DIM, IndexType>&);
 	public:
-		
+
 		/**
 		 * The dataset used by this index
 		 */
@@ -1225,6 +1225,57 @@ namespace nanoflann
 			computeBoundingBox(BaseClassRef::root_bbox);
 			BaseClassRef::root_node = this->divideTree(*this, 0, BaseClassRef::m_size, BaseClassRef::root_bbox );   // construct the tree
 		}
+
+        /**
+         * Returns true is this query point is probably a noise point.
+         * Params:
+         *     radius = the search radius
+         *     countThreshold = the minimal number of neighbors for this point to be classified as non-noise.
+         *     vec = the vector for which to search the nearest neighbors
+         *
+         * \return  Whether this point is a noise point.
+         */
+        size_t isNoise(const ElementType *vec, const DistanceType &radius, size_t countThreshold,
+                       const SearchParams &searchParams) const {
+            assert(vec);
+            if (size(*this) == 0)
+                return false;
+            if (!BaseClassRef::root_node)
+                throw std::runtime_error("[nanoflann] findNeighbors() called before building the index.");
+            float epsError = 1 + searchParams.eps;
+
+            distance_vector_t dists;                // fixed or variable-sized container (depending on DIM)
+            dists.assign((DIM > 0 ? DIM : BaseClassRef::dim), 0); // Fill it with zeros.
+            DistanceType distsq = computeInitialDistances(*this, vec, dists);
+            // "count_leaf" parameter removed since was neither used nor returned to the user.
+            return countLevelWithMaxCount(
+                    radius, 0, countThreshold, vec, BaseClassRef::root_node, distsq, dists, epsError
+                ) < countThreshold;
+        }
+
+        /**
+         * Count nearest neighbors to vec[0:dim-1].
+         * Params:
+         *     radius = the search radius
+         *     vec = the vector for which to search the nearest neighbors
+         *
+         * \return  The number of neighbors within the given radius.
+         */
+        size_t countNeighbors(const ElementType *vec, const DistanceType &radius, const SearchParams &searchParams) const
+        {
+            assert(vec);
+            if (size(*this) == 0)
+                return false;
+            if (!BaseClassRef::root_node)
+                throw std::runtime_error("[nanoflann] findNeighbors() called before building the index.");
+            float epsError = 1 + searchParams.eps;
+
+            distance_vector_t dists;                // fixed or variable-sized container (depending on DIM)
+            dists.assign((DIM > 0 ? DIM : BaseClassRef::dim), 0); // Fill it with zeros.
+            DistanceType distsq = computeInitialDistances(*this, vec, dists);
+            // "count_leaf" parameter removed since was neither used nor returned to the user.
+            return countLevel(radius, vec, BaseClassRef::root_node, distsq, dists, epsError);
+        }
 
 		/** \name Query methods
 		  * @{ */
@@ -1342,6 +1393,129 @@ namespace nanoflann
 				}
 			}
 		}
+
+        /**
+         * Performs an exact search in the tree starting from a node.
+         * \tparam RESULTSET Should be any ResultSet<DistanceType>
+         * \return true if the search should be continued, false if the results are sufficient
+         */
+        bool countLevelWithUpperBound(
+            const DistanceType& radius, size_t numNeighbors, size_t countThreshold,
+            const ElementType* vec, const NodePtr node, DistanceType mindistsq,
+            distance_vector_t& dists, const float epsError
+        ) const
+        {
+            /* If this is a leaf node, then do check and return. */
+            if ((node->child1 == NULL) && (node->child2 == NULL)) {
+                //count_leaf += (node->lr.right-node->lr.left);  // Removed since was neither used nor returned to the user.
+                for (IndexType i = node->node_type.lr.left; i<node->node_type.lr.right; ++i) {
+                    const IndexType index = BaseClassRef::vind[i];// reorder... : i;
+                    DistanceType dist = distance.evalMetric(vec, index, (DIM > 0 ? DIM : BaseClassRef::dim));
+                    if (dist < radius) {
+                        numNeighbors++;
+                        if(numNeighbors >= countThreshold) {
+                            return numNeighbors;
+                        }
+                    }
+                }
+                return numNeighbors;
+            }
+
+            /* Which child branch should be taken first? */
+            int idx = node->node_type.sub.divfeat;
+            ElementType val = vec[idx];
+            DistanceType diff1 = val - node->node_type.sub.divlow;
+            DistanceType diff2 = val - node->node_type.sub.divhigh;
+
+            NodePtr bestChild;
+            NodePtr otherChild;
+            DistanceType cut_dist;
+            if ((diff1 + diff2) < 0) {
+                bestChild = node->child1;
+                otherChild = node->child2;
+                cut_dist = distance.accum_dist(val, node->node_type.sub.divhigh, idx);
+            }
+            else {
+                bestChild = node->child2;
+                otherChild = node->child1;
+                cut_dist = distance.accum_dist( val, node->node_type.sub.divlow, idx);
+            }
+
+            /* Call recursively to search next level down. */
+            numNeighbors =
+                countLevelWithMaxCount(radius, numNeighbors, countThreshold, vec, bestChild, mindistsq, dists, epsError);
+            if (numNeighbors >= countThreshold) {
+                return numNeighbors;
+            }
+
+            DistanceType dst = dists[idx];
+            mindistsq = mindistsq + cut_dist - dst;
+            dists[idx] = cut_dist;
+            if (mindistsq*epsError <= radius) {
+                numNeighbors = countLevelWithMaxCount(radius, numNeighbors, countThreshold, vec, otherChild, mindistsq,
+                                                      dists, epsError);
+                if (numNeighbors >= countThreshold) {
+                    return numNeighbors;
+                }
+            }
+            dists[idx] = dst;
+            return numNeighbors;
+        }
+        /**
+         * Performs an exact search in the tree starting from a node.
+         * \tparam RESULTSET Should be any ResultSet<DistanceType>
+         * \return true if the search should be continued, false if the results are sufficient
+         */
+        bool countLevel(const DistanceType& radius, const ElementType* vec, const NodePtr node, DistanceType mindistsq,
+                 distance_vector_t& dists, const float epsError) const
+        {
+            size_t numNeighbors = 0;
+
+            /* If this is a leaf node, then do check and return. */
+            if ((node->child1 == NULL) && (node->child2 == NULL)) {
+                //count_leaf += (node->lr.right-node->lr.left);  // Removed since was neither used nor returned to the user.
+                for (IndexType i = node->node_type.lr.left; i<node->node_type.lr.right; ++i) {
+                    const IndexType index = BaseClassRef::vind[i];// reorder... : i;
+                    DistanceType dist = distance.evalMetric(vec, index, (DIM > 0 ? DIM : BaseClassRef::dim));
+                    if (dist < radius) {
+                        numNeighbors++;
+                    }
+                }
+                return numNeighbors;
+            }
+
+            /* Which child branch should be taken first? */
+            int idx = node->node_type.sub.divfeat;
+            ElementType val = vec[idx];
+            DistanceType diff1 = val - node->node_type.sub.divlow;
+            DistanceType diff2 = val - node->node_type.sub.divhigh;
+
+            NodePtr bestChild;
+            NodePtr otherChild;
+            DistanceType cut_dist;
+            if ((diff1 + diff2) < 0) {
+                bestChild = node->child1;
+                otherChild = node->child2;
+                cut_dist = distance.accum_dist(val, node->node_type.sub.divhigh, idx);
+            }
+            else {
+                bestChild = node->child2;
+                otherChild = node->child1;
+                cut_dist = distance.accum_dist( val, node->node_type.sub.divlow, idx);
+            }
+
+            /* Call recursively to search next level down. */
+            numNeighbors += countLevel(radius, vec, bestChild, mindistsq, dists, epsError);
+
+            DistanceType dst = dists[idx];
+            mindistsq = mindistsq + cut_dist - dst;
+            dists[idx] = cut_dist;
+            if (mindistsq * epsError <= radius) {
+                numNeighbors += countLevel(radius, vec, otherChild, mindistsq, dists, epsError);
+            }
+            dists[idx] = dst;
+            return numNeighbors;
+        }
 
 		/**
 		 * Performs an exact search in the tree starting from a node.
@@ -1462,7 +1636,7 @@ namespace nanoflann
 	 * \tparam Distance The distance metric to use: nanoflann::metric_L1, nanoflann::metric_L2, nanoflann::metric_L2_Simple, etc.
 	 * \tparam DIM Dimensionality of data points (e.g. 3 for 3D points)
 	 * \tparam IndexType Will be typically size_t or int
-	 */	 
+	 */
 	template <typename Distance, class DatasetAdaptor, int DIM = -1, typename IndexType = size_t>
 	class KDTreeSingleIndexDynamicAdaptor_ : public KDTreeBaseClass<KDTreeSingleIndexDynamicAdaptor_<Distance, DatasetAdaptor, DIM, IndexType>, Distance, DatasetAdaptor, DIM, IndexType>
 	{
@@ -1584,7 +1758,7 @@ namespace nanoflann
 		 * the result object.
 		 *  \sa radiusSearch, findNeighbors
 		 * \note nChecks_IGNORED is ignored but kept for compatibility with the original FLANN interface.
-		 * \return Number `N` of valid points in the result set. Only the first `N` entries in `out_indices` and `out_distances_sq` will be valid. 
+		 * \return Number `N` of valid points in the result set. Only the first `N` entries in `out_indices` and `out_distances_sq` will be valid.
 		 *         Return may be less than `num_closest` only if the number of elements in the tree is less than `num_closest`.
 		 */
 		size_t knnSearch(const ElementType *query_point, const size_t num_closest, IndexType *out_indices, DistanceType *out_distances_sq, const int /* nChecks_IGNORED */ = 10) const
@@ -1738,7 +1912,7 @@ namespace nanoflann
 	/** kd-tree dynaimic index
 	 *
 	 * class to create multiple static index and merge their results to behave as single dynamic index as proposed in Logarithmic Approach.
-	 *  
+	 *
 	 *  Example of usage:
 	 *  examples/dynamic_pointcloud_example.cpp
 	 *
@@ -1774,7 +1948,7 @@ namespace nanoflann
 		std::vector<index_container_t> index;
 
 	public:
-		/** Get a const ref to the internal list of indices; the number of indices is adapted dynamically as 
+		/** Get a const ref to the internal list of indices; the number of indices is adapted dynamically as
 		  * the dataset grows in size. */
 		const std::vector<index_container_t> & getAllIndices() const {
 			return index;
@@ -1885,7 +2059,7 @@ namespace nanoflann
 			return result.full();
 		}
 
-	}; 
+	};
 
 	/** An L2-metric KD-tree adaptor for working with data directly stored in an Eigen Matrix, without duplicating the data storage.
 	  *  Each row in the matrix represents a point in the state space.
