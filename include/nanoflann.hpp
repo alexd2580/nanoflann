@@ -1247,11 +1247,11 @@ namespace nanoflann
 
             distance_vector_t dists;                // fixed or variable-sized container (depending on DIM)
             dists.assign((DIM > 0 ? DIM : BaseClassRef::dim), 0); // Fill it with zeros.
-            DistanceType distsq = computeInitialDistances(*this, vec, dists);
+            DistanceType distsq = this->computeInitialDistances(*this, vec, dists);
             // "count_leaf" parameter removed since was neither used nor returned to the user.
-            return countLevelWithMaxCount(
+            return countLevelWithUpperBound(
                     radius, 0, countThreshold, vec, BaseClassRef::root_node, distsq, dists, epsError
-                ) < countThreshold;
+                ) >= countThreshold;
         }
 
         /**
@@ -1273,7 +1273,7 @@ namespace nanoflann
 
             distance_vector_t dists;                // fixed or variable-sized container (depending on DIM)
             dists.assign((DIM > 0 ? DIM : BaseClassRef::dim), 0); // Fill it with zeros.
-            DistanceType distsq = computeInitialDistances(*this, vec, dists);
+            DistanceType distsq = this->computeInitialDistances(*this, vec, dists);
             // "count_leaf" parameter removed since was neither used nor returned to the user.
             return countLevel(radius, vec, BaseClassRef::root_node, distsq, dists, epsError);
         }
@@ -1400,7 +1400,7 @@ namespace nanoflann
          * \tparam RESULTSET Should be any ResultSet<DistanceType>
          * \return true if the search should be continued, false if the results are sufficient
          */
-        bool countLevelWithUpperBound(
+        size_t countLevelWithUpperBound(
             const DistanceType& radius, size_t numNeighbors, size_t countThreshold,
             const ElementType* vec, const NodePtr node, DistanceType mindistsq,
             distance_vector_t& dists, const float epsError
@@ -1444,7 +1444,7 @@ namespace nanoflann
 
             /* Call recursively to search next level down. */
             numNeighbors =
-                countLevelWithMaxCount(radius, numNeighbors, countThreshold, vec, bestChild, mindistsq, dists, epsError);
+                countLevelWithUpperBound(radius, numNeighbors, countThreshold, vec, bestChild, mindistsq, dists, epsError);
             if (numNeighbors >= countThreshold) {
                 return numNeighbors;
             }
@@ -1453,7 +1453,7 @@ namespace nanoflann
             mindistsq = mindistsq + cut_dist - dst;
             dists[idx] = cut_dist;
             if (mindistsq*epsError <= radius) {
-                numNeighbors = countLevelWithMaxCount(radius, numNeighbors, countThreshold, vec, otherChild, mindistsq,
+                numNeighbors = countLevelWithUpperBound(radius, numNeighbors, countThreshold, vec, otherChild, mindistsq,
                                                       dists, epsError);
                 if (numNeighbors >= countThreshold) {
                     return numNeighbors;
@@ -1467,7 +1467,7 @@ namespace nanoflann
          * \tparam RESULTSET Should be any ResultSet<DistanceType>
          * \return true if the search should be continued, false if the results are sufficient
          */
-        bool countLevel(const DistanceType& radius, const ElementType* vec, const NodePtr node, DistanceType mindistsq,
+        size_t countLevel(const DistanceType& radius, const ElementType* vec, const NodePtr node, DistanceType mindistsq,
                  distance_vector_t& dists, const float epsError) const
         {
             size_t numNeighbors = 0;
