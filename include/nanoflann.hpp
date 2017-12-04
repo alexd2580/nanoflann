@@ -1235,10 +1235,11 @@ namespace nanoflann
          *
          * \return  Whether this point is a noise point.
          */
-        size_t isNoise(const ElementType *vec, const DistanceType &radius, size_t countThreshold,
-                       const SearchParams &searchParams) const {
+        size_t hasMoreThanNNeighbors(
+            const ElementType *vec, const DistanceType &radius, size_t countThreshold, const SearchParams &searchParams
+        ) const {
             assert(vec);
-            if (size(*this) == 0)
+            if (this->size(*this) == 0)
                 return false;
             if (!BaseClassRef::root_node)
                 throw std::runtime_error("[nanoflann] findNeighbors() called before building the index.");
@@ -1264,7 +1265,7 @@ namespace nanoflann
         size_t countNeighbors(const ElementType *vec, const DistanceType &radius, const SearchParams &searchParams) const
         {
             assert(vec);
-            if (size(*this) == 0)
+            if (this->size(*this) == 0)
                 return false;
             if (!BaseClassRef::root_node)
                 throw std::runtime_error("[nanoflann] findNeighbors() called before building the index.");
